@@ -1,0 +1,413 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+This is a simple script that launch a wx GUI to edit a mkv file tracks.
+At the moment, you can only remove some tracks and generate a new mkv.
+
+@author: Stéphane Péchard (stephanepechard@gmail.com)
+@license:GPL v3 or later
+"""
+
+# system
+import copy
+import os
+import subprocess
+import sys
+import threading
+import wx
+from wx.lib.pubsub import Publisher as pub
+from wx.lib.stattext import GenStaticText
+
+# constants
+FRAME_WIDTH = 800
+FRAME_HEIGHT = 400
+TRACK_TYPE_VIDEO = 'video'
+TRACK_TYPE_AUDIO = 'audio'
+TRACK_TYPE_SUBTS = 'subtitles'
+TRACK_TYPE_COLOR = {TRACK_TYPE_VIDEO: '#2093cd', TRACK_TYPE_AUDIO: '#f58559', TRACK_TYPE_SUBTS: '#67bf74'}
+PUBSUB_PERCENT = "fr.s13d.mkvtracks.pubsub.percent"
+PUBSUB_GEN_END = "fr.s13d.mkvtracks.pubsub.gen_end"
+UNKNOWN_LANG = '_un'
+LANG = {
+    'ara': 'Arabic', 'chi': 'Chinese', 'cez': 'Czech', 'dan': 'Danish',
+    'dut': 'Dutch', 'eng': 'English', 'est': 'Estonian', 'fin': 'Finnish',
+    'fre': 'French', 'ger': 'German', 'gre': 'Greek', 'ita': 'Italian',
+    'jpn': 'Japanese', 'kor': 'Korean', 'nor': 'Norwegian', 'pol': 'Polish',
+    'por': 'Potuguese', 'rum': 'Romanian', 'rus': 'Russian', 'slo': 'Slovak',
+    'spa': 'Spanish', 'swe': 'Swedish', 'tur': 'Turkish', 'ukr': 'Ukrainian',
+    UNKNOWN_LANG: 'Unknown',
+}
+
+
+
+########################################################################
+class MTPanel(wx.Panel):
+    """ mkvtracks Panel object """
+
+    #----------------------------------------------------------------------
+    def __init__(self, parent, mkvpath):
+        """ Initialize the panel """
+        wx.Panel.__init__(self, parent)
+        self.toggled = False
+        self.layoutWidgets()
+        self.setMkvInfo(mkvpath)
+        self.mkvmergethread = None
+
+
+    #----------------------------------------------------------------------
+    def layoutWidgets(self):
+        """ Create and layout the widgets """
+
+        # title of the input file
+        titleSizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        titleText = wx.StaticText(self, label="File:")
+        titleSizer.Add(titleText, 0, wx.CENTER|wx.RIGHT, 5)
+
+        self.title = wx.StaticText(self, label="Please, open a file...")
+        titleSizer.Add(self.title, 1, wx.CENTER|wx.ALIGN_CENTER)
+
+        titleBtn = wx.Button(self, label="&Open")
+        titleBtn.SetToolTip(wx.ToolTip("Open a mkv file"))
+        titleBtn.Bind(wx.EVT_BUTTON, self.openFile)
+        titleSizer.Add(titleBtn, 0, wx.CENTER)
+
+        topline = wx.StaticLine(self, size=(FRAME_WIDTH*0.9, 1))
+        self.botline = wx.StaticLine(self, size=(FRAME_WIDTH*0.9, 1))
+        self.botline.Hide()
+
+        # tracks
+        self.tracksSizer = wx.FlexGridSizer(cols=3)
+        
+        # bottom sizer: buttons and progress bar
+        buttonsSizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.progress = wx.Gauge(self, range=100, size=(200, 30))
+        self.progress.Hide()
+        buttonsSizer.Add(self.progress, 0, wx.RIGHT, border=5)
+        self.cancelBtn = wx.Button(self, label="&Cancel")
+        self.cancelBtn.SetToolTip(wx.ToolTip("Cancel the generation!"))
+        self.cancelBtn.Bind(wx.EVT_BUTTON, self.cancel)
+        self.cancelBtn.Hide()
+        self.cancelBtn.Disable()
+        buttonsSizer.Add(self.cancelBtn, 0, wx.RIGHT)
+        self.generateBtn = wx.Button(self, label="&Generate")
+        self.generateBtn.SetToolTip(wx.ToolTip("Click to generate a new mkv"))
+        self.generateBtn.Bind(wx.EVT_BUTTON, self.generate)
+        self.generateBtn.Hide()
+        buttonsSizer.Add(self.generateBtn, 0, wx.RIGHT)
+
+        # main sizer
+        self.mainSizer = wx.BoxSizer(wx.VERTICAL)
+        self.mainSizer.Add(titleSizer, 0, wx.EXPAND|wx.ALL, 5)
+        self.mainSizer.Add(topline, 0, wx.CENTER, border=10)
+        self.mainSizer.Add(self.tracksSizer, 0, wx.EXPAND|wx.ALL, border=5)
+        self.mainSizer.Add(self.botline, 0, wx.CENTER, border=10)
+        self.mainSizer.Add(buttonsSizer, 0, wx.ALL|wx.ALIGN_RIGHT, border=10)
+        self.SetSizer(self.mainSizer)
+
+    #----------------------------------------------------------------------
+    def openFile(self, event):
+        dlg = wx.FileDialog(self, "Choose a mkv file", '', "", "*.mkv", wx.OPEN)
+        if dlg.ShowModal() == wx.ID_OK:
+            self.setMkvInfo(dlg.GetPath())
+        dlg.Destroy()
+
+    #----------------------------------------------------------------------
+    def setMkvInfo(self, path):
+        if path and os.path.isfile(path):
+            self.mkvpath = os.path.abspath(path)
+            self.mkvname = os.path.basename(path)
+            # update frame
+            self.title.SetLabel(self.mkvname)
+            font = wx.Font(10, wx.DEFAULT, wx.NORMAL, wx.BOLD)
+            self.title.SetFont(font)
+            # update file info
+            self.mkvfile = MTFile(self.mkvpath)
+            self.fillTracks()
+            # update UI
+            self.setAllKeeps()
+            self.botline.Show()
+            self.cancelBtn.Show()
+            self.progress.Show()
+            self.generateBtn.Show()
+            self.Layout()
+
+    #----------------------------------------------------------------------
+    def fillTracks(self):
+        self.tracksSizer.Clear(True)
+        #self.tracksSizer.cols = 3
+        self.tracksSizer.rows = len(self.mkvfile.tracks)
+        #self.tracksSizer.AddGrowableCol(2, 1)
+
+        track_index = 0
+        for track in self.mkvfile.tracks:
+            fakeicon = (self.mkFakeicon(track['type']), 0, wx.ALIGN_CENTER_VERTICAL|wx.LEFT|wx.ALL, 15)
+            info = (self.mkTrackDesc(track), 1, wx.ALIGN_CENTER_VERTICAL|wx.LEFT|wx.ALL, 15)
+            cb = wx.CheckBox(self, label="Keep?")
+            cb.SetValue(True)
+            cb.Bind(wx.EVT_CHECKBOX, lambda event, tmp=track: self.checkKeep(event, tmp))
+            check = (cb, 0, wx.ALIGN_CENTER_VERTICAL|wx.LEFT|wx.ALL, 15)
+
+            self.tracksSizer.AddMany([fakeicon, info, check])
+            #self.tracksSizer.AddGrowableCol(1, track_index)
+            track_index += 1
+
+    #----------------------------------------------------------------------
+    def checkKeep(self, event, track):
+        sender = event.GetEventObject()
+        track['keep'] = sender.GetValue()
+        self.setAllKeeps()
+
+    #----------------------------------------------------------------------
+    def setAllKeeps(self):
+        self.allKeep = all([track['keep'] for track in self.mkvfile.tracks])
+        if self.allKeep:
+            self.generateBtn.Disable()
+        else:
+            self.generateBtn.Enable()
+
+    #----------------------------------------------------------------------
+    def mkTrackDesc(self, track):
+        desc = wx.StaticText(self)
+        if track['type'] == TRACK_TYPE_VIDEO:
+            label = "Duration: {} ; ".format(self.mkvfile.duration)
+            label += "Size: {}x{}".format(self.mkvfile.width, self.mkvfile.height)
+            desc.SetLabel(label)
+        elif track['type'] == TRACK_TYPE_AUDIO:
+            desc.SetLabel("Language: " + LANG[track['lang']])
+        elif track['type'] == TRACK_TYPE_SUBTS:
+            desc.SetLabel("Language: " + LANG[track['lang']])
+
+        return(desc)
+
+    #----------------------------------------------------------------------
+    def mkFakeicon(self, tracktype):
+        letter = tracktype[0].upper()
+        icon = GenStaticText(self, ID=-1, label=letter, size=(42,42),
+                             style=wx.SUNKEN_BORDER|wx.ALIGN_CENTER)
+        icon.SetForegroundColour(wx.WHITE)
+        icon.SetBackgroundColour(TRACK_TYPE_COLOR[tracktype])
+        icon.SetFont(wx.Font(25, wx.DEFAULT, wx.NORMAL, wx.BOLD))
+  
+        return(icon)
+
+    #----------------------------------------------------------------------
+    def generate(self, event):
+        pub.subscribe(self.generationDidProgress, PUBSUB_PERCENT)
+        pub.subscribe(self.generationDidEnd, PUBSUB_GEN_END)
+        dlg = wx.FileDialog(self, "Choose a name for your new mkv file",
+                            os.path.dirname(self.mkvfile.path),
+                            self.mkvfile.path, "*.mkv",
+                            wx.SAVE|wx.OVERWRITE_PROMPT)
+        if dlg.ShowModal() == wx.ID_OK:
+            # create a pubsub listener
+            self.generateBtn.Disable()
+            self.mkvmergethread = MTThread(self.mkvfile)
+            self.mkvmergethread.generate(dlg.GetPath())
+            self.cancelBtn.Enable()
+        dlg.Destroy()
+
+    #----------------------------------------------------------------------
+    def generationDidProgress(self, msg):
+        """ Update the progress bar """
+        try:
+            percent = int(msg.data)
+            self.progress.SetValue(percent)
+        except ValueError:
+            pass
+
+    #----------------------------------------------------------------------
+    def generationDidEnd(self, msg):
+        self.generateBtn.Enable()
+        self.cancelBtn.Disable()
+        self.progress.SetValue(0)
+
+    #----------------------------------------------------------------------
+    def cancel(self, event):
+        self.mkvmergethread.stop()
+        self.generationDidEnd('')
+
+
+########################################################################
+class MTFile():
+    """ mkvtracks MKV file object """
+
+    ebml = None
+    tracks = []
+
+    def __init__(self, mkvpath):
+        """ Initialize the file """
+        self.path = mkvpath
+
+        # Launch mkvinfo to fill EBML file infos.
+        try:
+            self.ebml = subprocess.check_output(['mkvinfo', self.path])
+        except OSError:
+            sys.exit("Can't find mkvinfo, is it installed?")
+
+        if self.ebml:
+            self.duration = self.findEbmlDuration()
+            self.tracks = self.findEbmlTracks()
+
+    #----------------------------------------------------------------------
+    def findEbmlDuration(self):
+        """ Parse Ebml text info to extract file duration. """
+        duration = ''
+        for line in self.ebml.split('\n'):
+            if 'Duration' in line:
+                duration = line[line.find('(') + 1:line.find(')')]
+                break
+
+        return(duration)
+
+    #----------------------------------------------------------------------
+    def findEbmlTracks(self):
+        """ Parse Ebml text info to extract file tracks. """
+        track_list = []
+        track_dict = {}
+        segment_start = False
+        for line in self.ebml.split('\n'):
+            if '|+ Segment tracks' in line: # start
+                segment_start = True
+                continue
+            if segment_start and 'Track number' in line:
+                track_dict['id'] = int(self.extractInfo(line))
+                continue
+            if segment_start and '+ Track type:' in line:
+                track_dict['type'] = self.extractInfo(line)
+                continue
+            if segment_start and '+ A track' in line: # new track
+                if track_dict:
+                    track_dict['keep'] = True
+                    if 'lang' not in track_dict:
+                        track_dict['lang'] = UNKNOWN_LANG
+                    track_list.append(copy.deepcopy(track_dict))
+                continue
+            if segment_start and '+ Pixel width' in line: # video track
+                self.width = self.extractInfo(line)
+                continue
+            if segment_start and '+ Pixel height:' in line: # video track
+                self.height = self.extractInfo(line)
+                continue
+
+            # audio or subs track
+            if segment_start and ('+ Language:' in line or '+ Name:' in line):
+                found = UNKNOWN_LANG
+                info = self.extractInfo(line)
+                for lang in LANG.keys():
+                    if lang in info.lower():
+                        found = lang
+                if found == UNKNOWN_LANG:
+                    for lang in LANG.values():
+                        if lang in info.lower():
+                            found = lang
+                track_dict['lang'] = found
+                continue
+
+        # finish parsing
+        if segment_start:
+            if track_dict:
+                track_dict['keep'] = True
+                if 'lang' not in track_dict:
+                    track_dict['lang'] = UNKNOWN_LANG
+                track_list.append(track_dict)
+            segment_start = False
+
+        return(track_list)
+
+    #----------------------------------------------------------------------
+    def extractInfo(self, line):
+        """ Extract info from an EBML line. """
+        dp = line.find(':')
+        par = line.find('(')
+        start = dp + 1
+        end = len(line)
+        if par != -1:
+            end = par - 1
+        return(line[start:end].strip())
+
+
+########################################################################
+class MTThread(threading.Thread):
+    """ mkvtracks thread object to handle mkvmerge process """
+
+    #----------------------------------------------------------------------
+    def __init__(self, mkvfile):
+        """Init Worker Thread Class."""
+        super(MTThread, self).__init__()
+        self.mkvfile = mkvfile
+        #self.stoprequest = threading.Event()
+
+    #----------------------------------------------------------------------
+    def generate(self, path):
+
+        # filter unkept tracks
+        video = [track['id'] for track in self.mkvfile.tracks if TRACK_TYPE_VIDEO in track.values() and track['keep']]
+        audio = [track['id'] for track in self.mkvfile.tracks if TRACK_TYPE_AUDIO in track.values() and track['keep']]
+        subts = [track['id'] for track in self.mkvfile.tracks if TRACK_TYPE_SUBTS in track.values() and track['keep']]
+
+        # prepare mkvmerge command
+        self.commands = ['mkvmerge', '-o', path]
+        if video:
+            self.commands.append('-d')
+            self.commands.append(','.join(str(i-1) for i in video))
+        if audio:
+            self.commands.append('-a')
+            self.commands.append(','.join(str(i-1) for i in audio))
+        if subts:
+            self.commands.append('-s')
+            self.commands.append(','.join(str(i-1) for i in subts))
+        self.commands.append(self.mkvfile.path)
+
+        # run it
+        self.start()
+
+    #----------------------------------------------------------------------
+    def run(self):
+        """Run Worker Thread."""
+        self.proc = subprocess.Popen(self.commands, stdout=subprocess.PIPE,
+                                     universal_newlines=True) # to remove \r
+        #while not self.stoprequest.isSet():
+        for line in iter(self.proc.stdout.readline, ''):
+            #line = iter(self.proc.stdout.readline, '').next()
+            self.proc.stdout.flush()
+            if 'Progress:' in line:
+                start = line.find(' ') + 1
+                end = line.find('%')
+                percent = int(line[start:end])
+                wx.CallAfter(pub.sendMessage, PUBSUB_PERCENT, percent)
+        wx.CallAfter(pub.sendMessage, PUBSUB_GEN_END, '')
+
+    #----------------------------------------------------------------------
+    def stop(self):
+        self.proc.terminate()
+        self.join()
+
+
+########################################################################
+class MTFrame(wx.Frame):
+    """ mkvtracks frame object """
+
+    panel = None
+
+    #----------------------------------------------------------------------
+    def __init__(self, mkvpath):
+        """Constructor"""
+        title = "mkvtracks"
+        size = (FRAME_WIDTH, FRAME_HEIGHT)
+        wx.Frame.__init__(self, parent=None, title=title, size=size,
+                          style=wx. RESIZE_BORDER | wx.MAXIMIZE_BOX | wx.SYSTEM_MENU | wx.CLOSE_BOX)
+        self.panel = MTPanel(self, mkvpath)
+
+        self.Show()
+
+
+if __name__ == "__main__":
+    mkvpath = None
+    if len(sys.argv) == 2:
+        mkvpath = sys.argv[1]
+
+    app = wx.App(False)
+    frame = MTFrame(mkvpath)
+    app.MainLoop()
