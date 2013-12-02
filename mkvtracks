@@ -17,6 +17,7 @@ import sys
 import threading
 import wx
 from wx.lib.pubsub import Publisher as pub
+import wx.lib.scrolledpanel as scrolled
 from wx.lib.stattext import GenStaticText
 
 # constants
@@ -42,15 +43,17 @@ LANG = {
 
 
 ########################################################################
-class MTPanel(wx.Panel):
+class MTPanel(scrolled.ScrolledPanel):
     """ mkvtracks Panel object """
 
     #----------------------------------------------------------------------
     def __init__(self, parent, mkvpath):
         """ Initialize the panel """
-        wx.Panel.__init__(self, parent)
-        self.toggled = False
+        #wx.Panel.__init__(self, parent)
+        scrolled.ScrolledPanel.__init__(self, parent, -1)
         self.layoutWidgets()
+        self.SetAutoLayout(1)
+        self.SetupScrolling()
         self.setMkvInfo(mkvpath)
         self.mkvmergethread = None
 
@@ -79,7 +82,13 @@ class MTPanel(wx.Panel):
 
         # tracks
         self.tracksSizer = wx.FlexGridSizer(cols=3)
-        
+        #import ipdb; ipdb.set_trace()
+        #self.scroll = scrolled.ScrolledPanel(self, -1)
+        #self.scroll.SetAutoLayout(1)
+        #self.scroll.SetupScrolling()
+        #self.tracksSizer.Add(self.scroll)
+        #self.scroll.SetSizer(self.tracksSizer)
+
         # bottom sizer: buttons and progress bar
         buttonsSizer = wx.BoxSizer(wx.HORIZONTAL)
         self.progress = wx.Gauge(self, range=100, size=(200, 30))
@@ -132,13 +141,12 @@ class MTPanel(wx.Panel):
             self.progress.Show()
             self.generateBtn.Show()
             self.Layout()
+            self.FitInside()
 
     #----------------------------------------------------------------------
     def fillTracks(self):
         self.tracksSizer.Clear(True)
-        #self.tracksSizer.cols = 3
         self.tracksSizer.rows = len(self.mkvfile.tracks)
-        #self.tracksSizer.AddGrowableCol(2, 1)
 
         track_index = 0
         for track in self.mkvfile.tracks:
@@ -150,7 +158,6 @@ class MTPanel(wx.Panel):
             check = (cb, 0, wx.ALIGN_CENTER_VERTICAL|wx.LEFT|wx.ALL, 15)
 
             self.tracksSizer.AddMany([fakeicon, info, check])
-            #self.tracksSizer.AddGrowableCol(1, track_index)
             track_index += 1
 
     #----------------------------------------------------------------------
@@ -397,7 +404,7 @@ class MTFrame(wx.Frame):
         title = "mkvtracks"
         size = (FRAME_WIDTH, FRAME_HEIGHT)
         wx.Frame.__init__(self, parent=None, title=title, size=size,
-                          style=wx. RESIZE_BORDER | wx.MAXIMIZE_BOX | wx.SYSTEM_MENU | wx.CLOSE_BOX)
+                          style= wx.SYSTEM_MENU | wx.CLOSE_BOX)
         self.panel = MTPanel(self, mkvpath)
 
         self.Show()
